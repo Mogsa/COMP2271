@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+"""
+Run the script from the command line with:
+    python noise_removal_and_sharpen.py --input_dir=/path/to/your/images
+
+This script loads the first valid image found in the specified input directory,
+applies OpenCV's fastNlMeansDenoisingColored to remove noise, then applies an unsharp mask
+to re-sharpen the denoised image, and finally displays the original, denoised, and sharpened images.
+"""
+
+import os
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import argparse
+
+def load_first_image(input_dir):
+    """
+    Loads the first valid image (with extension .jpg, .jpeg, or .png) found in the input directory.
+    
+    Returns:
+      image : The loaded image (BGR).
+      fname : The filename of the image.
+    """
+    for f in os.listdir(input_dir):
+        if f.lower().endswith(('.jpg')):
+            img_path = os.path.join(input_dir, f)
+            image = cv2.imread(img_path)
+            if image is not None:
+                return image, f
+    return None, None
+
+def denoise_image(image):
+    """
+    Applies OpenCV's fastNlMeansDenoisingColored to remove noise from a color image.
+    
+    Parameters:
+      image : Input color image (BGR) as a NumPy array.
+    
+    Returns:
+      The denoised image.
+    """
+    # h and hColor control the filtering strength.
+    denoised = cv2.fastNlMeansDenoisingColored(image, None, h=10, hColor=10, 
+                                                templateWindowSize=7, searchWindowSize=21)
+    return denoised
+
+def unsharp_mask(image, kernel_size=(5,5), sigma=1.0, amount=1.5):
+    """
+    Applies an unsharp mask to the input image to enhance sharpness.
+    
+    Parameters:
+      image       : Input image (BGR) as a NumPy array.
+      kernel_size : Size of the Gaussian kernel (default (5,5)).
+      sigma       : Standard deviation for the Gaussian blur (default 1.0).
+      amount      : Strength of the sharpening effect (default 1.5).
+    
+    Returns:
+      The sharpened image as a NumPy array.
+    """
+    blurred = cv2.GaussianBlur(image, kernel_size, sigma)
+    # Add weighted difference between the original image and the blurred image.
+    sharpened = cv2.addWeighted(image, 1 + amount, blurred, -amount, 0)
+    # Clip values and convert to uint8
+    sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
+    return sharpened
+
+def main(input_dir):
+    # Load the first valid image.
+    image, fname = load_first_image(input_dir)
+    if image is None:
+        print("No valid images found in the specified directory.")
+        return
+
+    # Apply noise removal.
+    denoised = denoise_image(image)
+    
+    # Apply unsharp masking to re-sharpen the denoised image.
+    sharpened = unsharp_mask(denoised)
+
+    # Display the original, denoised, and sharpened images side by side.
+    plt.figure(figsize=(18, 6))
+    
+    plt.subplot(1, 3, 1)
+    plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    plt.title("Original Image")
+    plt.axis("off")
+    
+    plt.subplot(1, 3, 2)
+    plt.imshow(cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB))
+    plt.title("Denoised Image\n(fastNlMeansDenoisingColored)")
+    plt.axis("off")
+    
+    plt.subplot(1, 3, 3)
+    plt.imshow(cv2.cvtColor(sharpened, cv2.COLOR_BGR2RGB))
+    plt.title("Sharpened Image")
+    plt.axis("off")
+    
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Remove noise from the first image in the input directory using fastNlMeansDenoisingColored, then re-sharpen the image using an unsharp mask."
+    )
+    parser.add_argument("--input_dir", type=str, required=True,
+                        help="Path to the input directory containing images.")
+    args = parser.parse_args()
+    main(args.input_dir)
