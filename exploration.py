@@ -3,182 +3,133 @@
 Run the script from the command line with:
     python /Users/morgan/Documents/GitHub/COMP2271/exploration.py --input_dir=/Users/morgan/Documents/GitHub/COMP2271/driving_images --output_dir=/Users/morgan/Documents/GitHub/COMP2271/Output_images
 
-This script processes all valid images in the specified input directory.
-For each image, it detects the four corners of the warped document (assuming the document is against a black background)
-using a robust edge/contour detection approach. If the initial method fails, a fallback method based on adaptive thresholding is tried.
-It then applies a projective transformation to correct the perspective warp and saves the resulting image to the output directory.
-Any images that fail to be processed are logged.
+This script processes all valid images in the input directory using a two-stage noise filtering algorithm designed for
+multicolored salt-and-pepper noise that appears in blobs:
+  
+  Stage 1 (Initial Filtering):  
+    A median filter with a relatively large kernel (e.g., 5x5) is applied to remove the most obvious noise.
+
+  Stage 2 (Secondary Filtering):  
+    A noise mask is computed by comparing the original image to the initially filtered image. For each pixel, if the
+    Euclidean distance (in color space) between the original and the median-filtered pixel exceeds a hard-coded
+    threshold (e.g., 30), that pixel is marked as noisy. OpenCV's inpainting (using the TELEA method) is then applied
+    to the original image using this mask, which fills in the noisy areas more precisely.
+
+The processed (refined) images are saved in the output directory.
 """
 
 import os
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 import argparse
 
-def order_points(pts):
+def denoise_image(image):
     """
-    Orders four points in the following order: top-left, top-right, bottom-right, bottom-left.
+    Applies OpenCV's fastNlMeansDenoisingColored to remove noise from a color image.
+    
+    Parameters:
+      image : Input color image (BGR) as a NumPy array.
+    
+    Returns:
+      denoised : The denoised image.
     """
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    return rect
+    denoised = cv2.fastNlMeansDenoisingColored(image, None, h=10, hForColorComponents=10, templateWindowSize=7, searchWindowSize=21)
+    return denoised
 
-def detect_document_corners(image, area_threshold_ratio=0.3):
+def initial_noise_filter(image, ksize=5):
     """
-    Attempts to detect the document corners using Canny edge detection, dilation,
-    and contour approximation.
+    Applies a median filter to remove the most obvious noise.
+
+    Parameters:
+      image : Input color image (BGR) as a NumPy array.
+      ksize : Kernel size for the median filter (e.g., 5).
+
+    Returns:
+      The initially filtered image.
     """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150)
-    kernel = np.ones((5, 5), np.uint8)
-    dilated = cv2.dilate(edges, kernel, iterations=1)
-    contours, _ = cv2.findContours(dilated.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    img_area = image.shape[0] * image.shape[1]
-    min_area = area_threshold_ratio * img_area
+    return cv2.medianBlur(image, ksize)
 
-    for cnt in contours:
-        if cv2.contourArea(cnt) < min_area:
-            continue
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        if len(approx) == 4:
-            return approx.reshape(4, 2)
-        else:
-            hull = cv2.convexHull(cnt)
-            peri = cv2.arcLength(hull, True)
-            approx = cv2.approxPolyDP(hull, 0.02 * peri, True)
-            if len(approx) == 4:
-                return approx.reshape(4, 2)
-            else:
-                rect = cv2.minAreaRect(cnt)
-                box = cv2.boxPoints(rect)
-                box = np.int0(box)
-                return box.reshape(4, 2)
-    return None
-
-def fallback_detect_document_corners(image, area_threshold_ratio=0.3):
+def compute_noise_mask(original, filtered, diff_threshold=30):
     """
-    Fallback method: Uses adaptive thresholding (instead of Otsu's) to generate a mask,
-    then finds contours from that mask.
+    Computes a binary noise mask by comparing the original image to the filtered image.
+
+    For each pixel, the Euclidean distance in color space between the original and filtered pixel is computed.
+    If the distance exceeds diff_threshold, the pixel is marked as noisy (value 255), otherwise 0.
+
+    Parameters:
+      original      : Original color image (BGR).
+      filtered      : Initially filtered image (BGR).
+      diff_threshold: Threshold value for marking a pixel as noisy.
+
+    Returns:
+      A binary mask (uint8) where noisy pixels are 255.
     """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    # Using adaptive thresholding; here we invert so that the document is white.
-    adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                              cv2.THRESH_BINARY_INV, 11, 2)
-    kernel = np.ones((3, 3), np.uint8)
-    adaptive_thresh = cv2.dilate(adaptive_thresh, kernel, iterations=1)
-    contours, _ = cv2.findContours(adaptive_thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    img_area = image.shape[0] * image.shape[1]
-    min_area = area_threshold_ratio * img_area
+    # Compute absolute difference per channel
+    diff = cv2.absdiff(original, filtered).astype(np.float32)
+    # Compute the Euclidean norm of the difference for each pixel
+    diff_norm = np.sqrt(np.sum(diff**2, axis=2))
+    # Create mask: pixels with difference greater than the threshold are marked as noise (255)
+    mask = np.uint8((diff_norm > diff_threshold) * 255)
+    return mask
 
-    for cnt in contours:
-        if cv2.contourArea(cnt) < min_area:
-            continue
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        if len(approx) == 4:
-            return approx.reshape(4, 2)
-        else:
-            hull = cv2.convexHull(cnt)
-            peri = cv2.arcLength(hull, True)
-            approx = cv2.approxPolyDP(hull, 0.02 * peri, True)
-            if len(approx) == 4:
-                return approx.reshape(4, 2)
-            else:
-                rect = cv2.minAreaRect(cnt)
-                box = cv2.boxPoints(rect)
-                box = np.int0(box)
-                return box.reshape(4, 2)
-    return None
-
-def correct_perspective(image, pts):
+def secondary_noise_filter(original, mask, inpaintRadius=3):
     """
-    Applies a perspective transformation to "unwarp" the image based on the provided corner points.
+    Applies inpainting on the original image using the given mask to remove remaining noise.
+
+    Parameters:
+      original     : Original color image (BGR).
+      mask         : Binary noise mask where noisy pixels are 255.
+      inpaintRadius: Inpainting radius.
+
+    Returns:
+      The refined (noise-reduced) image.
     """
-    rect = order_points(pts)
-    (tl, tr, br, bl) = rect
+    return cv2.inpaint(original, mask, inpaintRadius, cv2.INPAINT_TELEA)
 
-    widthA = np.linalg.norm(br - bl)
-    widthB = np.linalg.norm(tr - tl)
-    maxWidth = max(int(widthA), int(widthB))
-
-    heightA = np.linalg.norm(tr - br)
-    heightB = np.linalg.norm(tl - bl)
-    maxHeight = max(int(heightA), int(heightB))
-
-    dst = np.array([
-        [0, 0],
-        [maxWidth - 1, 0],
-        [maxWidth - 1, maxHeight - 1],
-        [0, maxHeight - 1]
-    ], dtype="float32")
-
-    M = cv2.getPerspectiveTransform(rect, dst)
-    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
-    return warped
-
-def load_first_image(input_dir):
+def process_image(image, diff_threshold=30):
     """
-    Loads the first valid image (with extension .jpg, .jpeg, or .png) found in the input directory.
-    """
-    for f in os.listdir(input_dir):
-        if f.lower().endswith(('.jpg', '.jpeg', '.png')):
-            img_path = os.path.join(input_dir, f)
-            image = cv2.imread(img_path)
-            if image is not None:
-                return image, f
-    return None, None
+    Processes a single image using the two-stage noise filtering algorithm.
 
-def process_image(image, filename, output_dir, failed_images):
-    """
-    Processes one image: attempts to detect corners and correct perspective.
-    If the initial detection fails, a fallback method is tried.
-    If both fail, the filename is logged.
-    """
-    pts = detect_document_corners(image, area_threshold_ratio=0.3)
-    if pts is None:
-        print(f"Initial detection failed for {filename}. Trying fallback method...")
-        pts = fallback_detect_document_corners(image, area_threshold_ratio=0.3)
-    if pts is None:
-        print(f"Could not detect corners for {filename} even with fallback. Skipping...")
-        failed_images.append(filename)
-        return
+    Stage 1: Apply an initial median filter.
+    Stage 2: Compute a noise mask and apply inpainting for precise noise removal.
 
-    unwarped = correct_perspective(image, pts)
-    output_path = os.path.join(output_dir, filename)
-    cv2.imwrite(output_path, unwarped)
-    print(f"Processed {filename} saved to {output_path}.")
+    Parameters:
+      image         : Input color image (BGR).
+      diff_threshold: Threshold for detecting noisy pixels.
 
-def process_all_images(input_dir, output_dir):
+    Returns:
+      refined_image: The final noise-filtered image.
+      mask         : The computed noise mask.
+      initial_filtered: The image after initial median filtering.
     """
-    Processes all valid images in the input directory:
-      - Loads each image.
-      - Applies robust document corner detection and perspective correction.
-      - Saves the corrected images to the output directory.
-      - Logs filenames that fail processing.
+    # Stage 1: Initial noise filtering using median filter
+    initial_filtered = initial_noise_filter(image, ksize=5)
+    # Stage 2: Compute noise mask from difference between original and filtered image
+    mask = compute_noise_mask(image, initial_filtered, diff_threshold=diff_threshold)
+    # Apply inpainting using the computed noise mask
+    refined_image = secondary_noise_filter(image, mask, inpaintRadius=3)
+    return refined_image, mask, initial_filtered
+
+def process_all_images(input_dir, output_dir, diff_threshold=30):
+    """
+    Processes all valid images in the input directory using the two-stage noise filtering algorithm,
+    and saves the refined images to the output directory.
+
+    Parameters:
+      input_dir     : Path to the directory containing images.
+      output_dir    : Path to the directory where processed images will be saved.
+      diff_threshold: Threshold for the noise mask.
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-
-    failed_images = []
+    
     image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
     if not image_files:
         print("No valid images found in the specified directory.")
         return
 
+    failed_images = []
+    
     for filename in image_files:
         img_path = os.path.join(input_dir, filename)
         image = cv2.imread(img_path)
@@ -186,8 +137,16 @@ def process_all_images(input_dir, output_dir):
             print(f"Warning: Could not load {filename}.")
             failed_images.append(filename)
             continue
-        process_image(image, filename, output_dir, failed_images)
-
+        
+        try:
+            refined, mask, initial_filtered = process_image(image, diff_threshold=diff_threshold)
+            output_path = os.path.join(output_dir, filename)
+            cv2.imwrite(output_path, refined)
+            print(f"Processed {filename} saved to {output_path}.")
+        except Exception as e:
+            print(f"Error processing {filename}: {e}")
+            failed_images.append(filename)
+    
     if failed_images:
         print("\nThe following images failed to be processed:")
         for f in failed_images:
@@ -195,16 +154,18 @@ def process_all_images(input_dir, output_dir):
     else:
         print("\nAll images were processed successfully.")
 
-def main(input_dir, output_dir):
-    process_all_images(input_dir, output_dir)
+def main(input_dir, output_dir, diff_threshold):
+    process_all_images(input_dir, output_dir, diff_threshold=diff_threshold)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Detect document edges and correct the perspective warp for all images in the input directory, saving the results to the output directory. Images that fail processing will be logged."
+        description="Apply a two-stage noise filtering algorithm to remove multicolored salt-and-pepper noise from all images in the input directory, then save the refined images to the output directory."
     )
     parser.add_argument("--input_dir", type=str, required=True,
                         help="Path to the input directory containing images.")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Path to the output directory where processed images will be saved.")
+    parser.add_argument("--diff_threshold", type=int, default=30,
+                        help="Threshold for detecting noisy pixels based on color difference (default=30).")
     args = parser.parse_args()
-    main(args.input_dir, args.output_dir)
+    main(args.input_dir, args.output_dir, args.diff_threshold)
