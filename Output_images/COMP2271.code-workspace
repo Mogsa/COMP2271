@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "COMP2271",
+			"path": ".."
+		},
+		{
+			"name": "image-processing-files",
+			"path": "../../../../Downloads/image-processing-files"
+		}
+	],
+	"settings": {}
+}

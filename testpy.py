@@ -1,37 +1,18 @@
-#!/usr/bin/env python
+"""
+This script processes all valid images in the specified input directory.
+For each image, it detects the four corners of a warped document (assuming the document
+is against a dark background) using a robust edge/contour detection approach.
+If the initial method fails, a fallback method using adaptive thresholding is attempted.
+Once the corners are detected, a perspective transformation is applied to "unwarp" the document,
+and the resulting image is saved to the output directory.
+Any images that fail to be processed (for example, if the corners cannot be detected)
+are logged.
+"""
+
 import os
 import cv2
 import numpy as np
 import argparse
-
-def denoise_image(image):
-    """
-    Applies OpenCV's fastNlMeansDenoisingColored to remove noise from a color image.
-    
-    Parameters:
-      image : Input color image (BGR) as a NumPy array.
-    
-    Returns:
-      denoised : The denoised image.
-    """
-    # Convert to YCrCb color space
-    ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
-    y, cr, cb = cv2.split(ycrcb)
-
-    # Denoise the color channels (targeting color noise)
-    denoised_cr = cv2.fastNlMeansDenoising(cr, None, h=15, templateWindowSize=7, searchWindowSize=21)
-    denoised_cb = cv2.fastNlMeansDenoising(cb, None, h=15, templateWindowSize=7, searchWindowSize=21)
-
-    # Keep luminance channel as is to preserve details
-    denoised_y = y
-
-    # Merge channels back together and convert to BGR
-    denoised_ycrcb = cv2.merge((denoised_y, denoised_cr, denoised_cb))
-    denoised_bgr = cv2.cvtColor(denoised_ycrcb, cv2.COLOR_YCrCb2BGR)
-
-    denoised_bgr = cv2.medianBlur(denoised_bgr, 3)
-
-    return denoised_bgr
 
 def order_points(pts):
     """
@@ -105,7 +86,7 @@ def detect_document_corners(image, area_threshold_ratio=0.3):
             else:
                 rect = cv2.minAreaRect(cnt)
                 box = cv2.boxPoints(rect)
-                box = np.array(box, dtype=np.int32)
+                box = np.int0(box)
                 return box.reshape(4, 2)
     return None
 
@@ -143,7 +124,7 @@ def fallback_detect_document_corners(image, area_threshold_ratio=0.3):
             else:
                 rect = cv2.minAreaRect(cnt)
                 box = cv2.boxPoints(rect)
-                box = np.array(box, dtype=np.int32)
+                box = np.int0(box)
                 return box.reshape(4, 2)
     return None
 
@@ -184,57 +165,66 @@ def correct_perspective(image, pts):
 
     return warped
 
-def process_images(input_dir, output_dir="Results"):
+def process_image(image, filename, output_dir, failed_images):
     """
-    Processes all images in the input directory by applying perspective correction.
-    Saves the processed images to the 'Results' directory using the same filenames.
+    Processes one image: detects document corners, corrects perspective, and saves the result.
+    If corner detection fails, logs the filename.
+
+    Parameters:
+      image       : Input image (BGR).
+      filename    : Filename of the image.
+      output_dir  : Directory where the processed image will be saved.
+      failed_images: List to accumulate filenames of images that fail processing.
     """
-    # Create the output directory if it does not exist.
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    # Supported image extensions.
-    valid_extensions = ('.jpg', '.jpeg', '.png')
-    image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(valid_extensions)]
-    
-    if not image_files:
-        print(f"No valid images found in directory: {input_dir}")
+    pts = detect_document_corners(image, area_threshold_ratio=0.3)
+    if pts is None:
+        print(f"Could not detect corners for {filename} using the initial method. Trying fallback...")
+        pts = fallback_detect_document_corners(image, area_threshold_ratio=0.3)
+    if pts is None:
+        print(f"Could not detect corners for {filename} even with fallback. Skipping...")
+        failed_images.append(filename)
         return
 
-    for filename in image_files:
-        input_path = os.path.join(input_dir, filename)
-        image = cv2.imread(input_path)
-        
-        if image is None:
-            print(f"Warning: Could not read image {filename}. Skipping...")
-            continue
-
-        # Apply noise removal.
-        denoised_image = denoise_image(image)
-
-        # Detect document corners.
-        pts = detect_document_corners(denoised_image)
-        if pts is None:
-            print(f"Warning: Could not detect document corners in {filename}. Skipping...")
-            continue
-
-        # Apply perspective correction using the detected corners.
-        processed_image = correct_perspective(denoised_image, pts)
-        
-        # Save the processed image using the same filename.
-        output_path = os.path.join(output_dir, filename)
-        cv2.imwrite(output_path, processed_image)
-        print(f"Processed and saved: {output_path}")
+    unwarped = correct_perspective(image, pts)
+    output_path = os.path.join(output_dir, filename)
+    cv2.imwrite(output_path, unwarped)
+    print(f"Processed and saved {filename}.")
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Process images by correcting perspective distortion using corner detection "
-                    "via goodFeaturesToTrack combined with a convex hull method to approximate document corners."
-    )
-    parser.add_argument("input_dir", help="Directory containing images to process.")
+    parser = argparse.ArgumentParser(description="Document Perspective Correction")
+    parser.add_argument("input_dir", help="Path to the input directory containing images.")
+    parser.add_argument("output_dir", help="Path to the output directory for processed images.")
     args = parser.parse_args()
 
-    process_images(args.input_dir)
+    input_dir = args.input_dir
+    output_dir = args.output_dir
+
+    if not os.path.exists(input_dir):
+        print(f"Input directory '{input_dir}' does not exist.")
+        return
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created output directory '{output_dir}'.")
+
+    failed_images = []
+
+    for filename in os.listdir(input_dir):
+        if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            image_path = os.path.join(input_dir, filename)
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"Failed to load {filename}. Skipping...")
+                failed_images.append(filename)
+                continue
+            process_image(image, filename, output_dir, failed_images)
+
+    if failed_images:
+        print("\nThe following images failed to process:")
+        for f in failed_images:
+            print(f)
+    else:
+        print("\nAll images processed successfully.")
 
 if __name__ == "__main__":
     main()
