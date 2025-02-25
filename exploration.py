@@ -3,6 +3,247 @@ import os
 import numpy as np
 import argparse
 
+
+def remove_multicolored_noise(image, strength=3):
+    """
+    Specialized function to remove multicolored noise patterns while preserving details
+    
+    Args:
+        image: Input image with multicolored noise
+        strength: Denoising strength (1-5)
+        
+    Returns:
+        Denoised image
+    """
+    # Make a copy to avoid modifying the original
+    result = image.copy()
+    
+    # Step 1: Color space conversion to work in a more noise-separable space
+    # LAB color space separates luminance from color information
+    lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    # Step 2: Apply targeted filtering to luminance channel
+    # This preserves edges while removing noise
+    l_denoised = cv2.fastNlMeansDenoising(l, None, h=10*strength, templateWindowSize=7, searchWindowSize=21)
+    
+    # Step 3: Apply stronger filtering to color channels where human eye is less sensitive
+    # Use a series of filters for maximum effectiveness
+    
+    # 3.1 First, apply small median filter to remove extreme outliers (salt & pepper)
+    a_filtered = cv2.medianBlur(a, 3)
+    b_filtered = cv2.medianBlur(b, 3)
+    
+    # 3.2 Then apply bilateral filter to smooth while preserving edges
+    a_filtered = cv2.bilateralFilter(a_filtered, 5, 25*strength, 5*strength)
+    b_filtered = cv2.bilateralFilter(b_filtered, 5, 25*strength, 5*strength)
+    
+    # 3.3 Finally, apply non-local means to the color channels
+    a_denoised = cv2.fastNlMeansDenoising(a_filtered, None, h=15*strength, templateWindowSize=7, searchWindowSize=21)
+    b_denoised = cv2.fastNlMeansDenoising(b_filtered, None, h=15*strength, templateWindowSize=7, searchWindowSize=21)
+    
+    # Step 4: Merge channels and convert back to BGR
+    lab_denoised = cv2.merge([l_denoised, a_denoised, b_denoised])
+    result = cv2.cvtColor(lab_denoised, cv2.COLOR_LAB2BGR)
+    
+    return result
+
+
+def remove_multicolored_noise_detail_preserving(image, strength=3):
+    """
+    Enhanced version of multicolored noise removal with better detail preservation
+    
+    Args:
+        image: Input image with multicolored noise
+        strength: Denoising strength (1-5)
+        
+    Returns:
+        Denoised image with preserved details
+    """
+    # Make a copy to avoid modifying the original
+    result = image.copy()
+    
+    # Step 1: Edge detection to create a detail mask before denoising
+    gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    
+    # Dilate edges slightly to ensure all details are covered
+    kernel = np.ones((2, 2), np.uint8)
+    detail_mask = cv2.dilate(edges, kernel, iterations=1)
+    
+    # Create a more sensitive detail mask using Laplacian
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    laplacian_mask = np.uint8(np.absolute(laplacian) > 5)
+    
+    # Combine both masks for comprehensive detail detection
+    combined_mask = cv2.bitwise_or(detail_mask, laplacian_mask * 255)
+    
+    # Step 2: Color space conversion to work in a more noise-separable space
+    # LAB color space separates luminance from color information
+    lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    # Step 3: Apply different filtering strengths to luminance vs. color channels
+    
+    # 3.1: For luminance channel - use gentler filtering to preserve details
+    # Reduce strength for luminance to preserve more details
+    l_strength = max(1, strength - 1)  # Reduce strength for luminance channel
+    
+    # First use bilateral filter which is excellent for preserving edges
+    l_filtered = cv2.bilateralFilter(l, 5, 20*l_strength, 7)
+    
+    # Then apply gentle non-local means for areas without strong details
+    l_denoised = cv2.fastNlMeansDenoising(l_filtered, None, 
+                                         h=7*l_strength,  # Reduced h parameter
+                                         templateWindowSize=5,  # Smaller window
+                                         searchWindowSize=15)
+    
+    # 3.2: For color channels - use stronger filtering as human eye is less sensitive to color details
+    # Apply small median filter to remove extreme outliers (salt & pepper)
+    a_filtered = cv2.medianBlur(a, 3)
+    b_filtered = cv2.medianBlur(b, 3)
+    
+    # Then apply bilateral filter to smooth while preserving edges
+    a_filtered = cv2.bilateralFilter(a_filtered, 5, 25*strength, 5*strength)
+    b_filtered = cv2.bilateralFilter(b_filtered, 5, 25*strength, 5*strength)
+    
+    # Finally, apply non-local means to the color channels
+    a_denoised = cv2.fastNlMeansDenoising(a_filtered, None, h=15*strength, 
+                                          templateWindowSize=7, searchWindowSize=21)
+    b_denoised = cv2.fastNlMeansDenoising(b_filtered, None, h=15*strength, 
+                                          templateWindowSize=7, searchWindowSize=21)
+    
+    # Step 4: Preserve the original luminance in areas with strong details
+    combined_mask_normalized = combined_mask.astype(float) / 255.0
+    
+    # Create a weight map based on the detail mask (values between 0.3 and 1.0)
+    # This allows partial denoising even in detail areas
+    detail_weight = 0.3 + (0.7 * combined_mask_normalized)
+    
+    # Apply weighted combination of original and denoised luminance
+    l_result = np.uint8(l * detail_weight + l_denoised * (1 - detail_weight))
+    
+    # Step 5: Merge channels and convert back to BGR
+    lab_denoised = cv2.merge([l_result, a_denoised, b_denoised])
+    result = cv2.cvtColor(lab_denoised, cv2.COLOR_LAB2BGR)
+    
+    return result
+
+
+def apply_enhanced_denoising(image, strength=3, detail_preservation=0.6):
+    """
+    Enhanced multi-stage approach for noise removal with detail preservation
+    
+    Args:
+        image: Input image with mixed noise
+        strength: Denoising strength (1-5)
+        detail_preservation: Level of detail to preserve (0.0-1.0)
+                            Higher values preserve more detail but may keep more noise
+        
+    Returns:
+        Denoised image with preserved details
+    """
+    # Adjust parameters to reasonable ranges
+    strength = max(1, min(5, strength))
+    detail_preservation = max(0.0, min(1.0, detail_preservation))
+    
+    # Stage 1: Extract details from original image that we want to preserve
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Create a detail mask using multiple methods for better coverage
+    # Sobel for detecting strong edges
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    sobel_magnitude = cv2.magnitude(sobelx, sobely)
+    sobel_mask = np.uint8(sobel_magnitude > 20)
+    
+    # Laplacian for detecting fine details
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    laplacian_mask = np.uint8(np.absolute(laplacian) > 5)
+    
+    # Combine masks
+    detail_mask = cv2.bitwise_or(sobel_mask, laplacian_mask) * 255
+    
+    # Dilate to include neighboring pixels around details
+    kernel = np.ones((2, 2), np.uint8)
+    detail_mask = cv2.dilate(detail_mask, kernel, iterations=1)
+    
+    # Stage 2: First handle color noise with initial HSV filtering
+    # This targets the multicolored noise while preserving structure
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    
+    # Apply adaptive median filter to saturation channel
+    # This reduces color noise while preserving edges
+    s_filtered = cv2.medianBlur(s, 3)
+    
+    # Use bilateral filter for value channel to preserve edges
+    v_filtered = cv2.bilateralFilter(v, 5, 30, 30)
+    
+    # Recombine and convert back to BGR
+    hsv_filtered = cv2.merge([h, s_filtered, v_filtered])
+    color_filtered = cv2.cvtColor(hsv_filtered, cv2.COLOR_HSV2BGR)
+    
+    # Stage 3: Apply detail-preserving denoising
+    denoised = remove_multicolored_noise_detail_preserving(color_filtered, strength)
+    
+    # Stage 4: Combine original image details with denoised image
+    # Create a normalized weight map from detail mask
+    detail_weight_map = cv2.GaussianBlur(detail_mask.astype(float), (5, 5), 0) / 255.0
+    
+    # Adjust weight map based on detail_preservation parameter
+    detail_weight_map = detail_weight_map * detail_preservation
+    
+    # Convert maps to 3-channel for weighted blending
+    detail_weight_map_3ch = cv2.merge([detail_weight_map, detail_weight_map, detail_weight_map])
+    
+    # Combine original and denoised using the weight map
+    result = np.uint8(image * detail_weight_map_3ch + denoised * (1 - detail_weight_map_3ch))
+    
+    # Stage 5: Final refinement to smooth any artifacts while preserving edges
+    # Use a guided filter for edge-aware smoothing
+    refined = cv2.bilateralFilter(result, 5, 10, 10)
+    
+    # Additional texture-preserving step: 
+    # Only apply refined result where detail weight is low
+    # Use original with denoising where detail weight is high
+    low_detail_mask = 1 - (detail_weight_map_3ch > 0.3)
+    final_result = np.uint8(refined * low_detail_mask + result * (1 - low_detail_mask))
+    
+    return final_result
+
+
+def preserve_black_areas(original_image, processed_image, threshold=20):
+    """
+    Preserve black areas (like holes) from the original image
+    
+    Args:
+        original_image: Original image with holes
+        processed_image: Processed image where holes need to be preserved
+        threshold: Brightness threshold to identify black areas
+        
+    Returns:
+        Image with black areas preserved
+    """
+    # Convert to grayscale
+    gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
+    
+    # Create a mask for very dark areas
+    _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
+    
+    # Dilate the mask slightly to ensure all of the black area is covered
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    
+    # Convert the mask to 3 channels for merging
+    mask_3ch = cv2.merge([mask, mask, mask])
+    
+    # Combine the images: use original where mask is white, processed elsewhere
+    result = np.where(mask_3ch > 0, original_image, processed_image)
+    
+    return result
+
+
 def apply_brightness_contrast(image, brightness=0, contrast=1.0, use_clahe=False):
     """
     Apply brightness and contrast adjustment to an image
@@ -83,38 +324,6 @@ def auto_brightness_contrast(image, clip_hist_percent=1):
     return cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
 
 
-def process_image(image, fix_perspective=True, fix_brightness=True, auto_adjust=True,
-                 brightness=30, contrast=1.5, use_clahe=False):
-    """
-    Complete image processing pipeline
-    
-    Args:
-        image: Input image
-        fix_perspective: Whether to apply perspective correction
-        fix_brightness: Whether to apply brightness/contrast correction
-        auto_adjust: Use automatic brightness/contrast adjustment
-        brightness: Manual brightness value
-        contrast: Manual contrast value
-        use_clahe: Use CLAHE instead of linear adjustments
-        
-    Returns:
-        Processed image
-    """
-    result = image.copy()
-    
-    # Step 1: Perspective correction
-    if fix_perspective:
-        result = auto_perspective_correction(result)
-    
-    # Step 2: Brightness and contrast correction
-    if fix_brightness:
-        if auto_adjust:
-            result = auto_brightness_contrast(result)
-        else:
-            result = apply_brightness_contrast(result, brightness, contrast, use_clahe)
-    
-    return result
-
 def auto_perspective_correction(image):
     """Ensure output is always a perfect square with 90 degree angles"""
     result = try_contour_detection(image)
@@ -125,6 +334,7 @@ def auto_perspective_correction(image):
         result = make_square(image)
     
     return result
+
 
 def try_contour_detection(image):
     """Enhanced contour detection with adaptive parameters"""
@@ -196,6 +406,7 @@ def try_contour_detection(image):
     
     return create_square_from_points(image, approx)
 
+
 def try_hough_lines(image):
     """Improved Hough lines method with adaptive thresholds"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -255,6 +466,29 @@ def try_hough_lines(image):
     
     return None
 
+
+def line_intersection(line1, line2):
+    """Find intersection point of two lines with improved numerical stability"""
+    rho1, theta1 = line1
+    rho2, theta2 = line2
+    
+    # Check if lines are nearly parallel to avoid numerical issues
+    if abs(np.sin(theta1 - theta2)) < 1e-10:
+        return None
+    
+    A = np.array([
+        [np.cos(theta1), np.sin(theta1)],
+        [np.cos(theta2), np.sin(theta2)]
+    ])
+    b = np.array([rho1, rho2])
+    
+    try:
+        x, y = np.linalg.solve(A, b)
+        return [int(x), int(y)]
+    except np.linalg.LinAlgError:
+        return None
+
+
 def create_square_from_points(image, points):
     """Create a perfect square from 4 points with improved border handling"""
     # Get original image dimensions
@@ -294,26 +528,6 @@ def create_square_from_points(image, points):
     
     return warped
 
-def line_intersection(line1, line2):
-    """Find intersection point of two lines with improved numerical stability"""
-    rho1, theta1 = line1
-    rho2, theta2 = line2
-    
-    # Check if lines are nearly parallel to avoid numerical issues
-    if abs(np.sin(theta1 - theta2)) < 1e-10:
-        return None
-    
-    A = np.array([
-        [np.cos(theta1), np.sin(theta1)],
-        [np.cos(theta2), np.sin(theta2)]
-    ])
-    b = np.array([rho1, rho2])
-    
-    try:
-        x, y = np.linalg.solve(A, b)
-        return [int(x), int(y)]
-    except np.linalg.LinAlgError:
-        return None
 
 def order_points(pts):
     """Order points in: top-left, top-right, bottom-right, bottom-left order"""
@@ -328,6 +542,7 @@ def order_points(pts):
     bl = pts[np.argmax(diff)]  # Bottom-left has largest difference
     
     return np.array([tl, tr, br, bl], dtype="float32")
+
 
 def make_square(image):
     """Improved fallback to make image square with better border color"""
@@ -355,9 +570,66 @@ def make_square(image):
     
     return square
 
-# Update the main processing function to use the new pipeline
-def process_images(input_dir, output_dir, fix_perspective=True, fix_brightness=True, 
-                  auto_adjust=True, brightness=30, contrast=1.5, use_clahe=False):
+
+def process_image(image, fix_perspective=True, fix_brightness=True, fix_noise=True, 
+                 auto_adjust=True, brightness=30, contrast=1.5, use_clahe=False, 
+                 denoise_strength=3, detail_preservation=0.6):
+    """
+    Complete image processing pipeline
+    
+    Args:
+        image: Input image
+        fix_perspective: Whether to apply perspective correction
+        fix_brightness: Whether to apply brightness/contrast correction
+        fix_noise: Whether to apply noise reduction
+        auto_adjust: Use automatic brightness/contrast adjustment
+        brightness: Manual brightness value
+        contrast: Manual contrast value
+        use_clahe: Use CLAHE instead of linear adjustments
+        denoise_strength: Strength of denoising (1-5)
+        detail_preservation: Level of detail to preserve (0.0-1.0)
+        
+    Returns:
+        Processed image
+    """
+    # Save a copy of the original for preserving black areas
+    original = image.copy()
+    result = image.copy()
+    
+    # Step 1: Perspective correction
+    if fix_perspective:
+        result = auto_perspective_correction(result)
+    
+    # Step 2: Apply enhanced denoising with detail preservation
+    if fix_noise:
+        result = apply_enhanced_denoising(result, denoise_strength, detail_preservation)
+    
+    # Step 3: Brightness and contrast correction
+    if fix_brightness:
+        if auto_adjust:
+            result = auto_brightness_contrast(result)
+        else:
+            result = apply_brightness_contrast(result, brightness, contrast, use_clahe)
+    
+    # Step 4: Ensure any black holes from the original image are preserved
+    # Create a mask for very dark areas
+    gray_original = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+    _, black_mask = cv2.threshold(gray_original, 20, 255, cv2.THRESH_BINARY_INV)
+    
+    # Dilate the mask slightly to ensure full coverage
+    kernel = np.ones((3, 3), np.uint8)
+    black_mask = cv2.dilate(black_mask, kernel, iterations=1)
+    
+    # Apply the mask to preserve black areas from original
+    black_mask_3ch = cv2.merge([black_mask, black_mask, black_mask])
+    result = np.where(black_mask_3ch > 0, original, result)
+    
+    return result
+
+
+def process_images(input_dir, output_dir, fix_perspective=True, fix_brightness=True, fix_noise=True,
+                  auto_adjust=True, brightness=30, contrast=1.5, use_clahe=False, 
+                  denoise_strength=3, detail_preservation=0.6):
     """Process all images in input_dir and save results to output_dir"""
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -391,10 +663,13 @@ def process_images(input_dir, output_dir, fix_perspective=True, fix_brightness=T
                 image, 
                 fix_perspective=fix_perspective,
                 fix_brightness=fix_brightness,
+                fix_noise=fix_noise,
                 auto_adjust=auto_adjust,
                 brightness=brightness,
                 contrast=contrast,
-                use_clahe=use_clahe
+                use_clahe=use_clahe,
+                denoise_strength=denoise_strength,
+                detail_preservation=detail_preservation
             )
             
             cv2.imwrite(output_path, processed)
@@ -406,7 +681,7 @@ def process_images(input_dir, output_dir, fix_perspective=True, fix_brightness=T
 def main():
     """Parse command line arguments and process images"""
     parser = argparse.ArgumentParser(
-        description="Image processing pipeline with perspective and brightness/contrast correction."
+        description="Advanced image processing pipeline with detail-preserving denoising."
     )
     parser.add_argument("--input_dir", default="driving_images", 
                        help="Directory containing images to process")
@@ -416,6 +691,8 @@ def main():
                        help="Skip perspective correction")
     parser.add_argument("--skip_brightness", action="store_true",
                        help="Skip brightness/contrast correction")
+    parser.add_argument("--skip_noise", action="store_true",
+                       help="Skip noise reduction")
     parser.add_argument("--manual_adjust", action="store_true",
                        help="Use manual brightness/contrast values instead of auto adjustment")
     parser.add_argument("--brightness", type=int, default=30,
@@ -424,6 +701,10 @@ def main():
                        help="Contrast adjustment (0.0 to 3.0, default: 1.5)")
     parser.add_argument("--use_clahe", action="store_true",
                        help="Use CLAHE for brightness/contrast correction")
+    parser.add_argument("--denoise_strength", type=int, choices=range(1, 6), default=3,
+                       help="Strength of denoising (1-5, default: 3)")
+    parser.add_argument("--detail_preservation", type=float, default=0.6,
+                       help="Level of detail to preserve (0.0-1.0, default: 0.6)")
     
     args = parser.parse_args()
     
@@ -433,10 +714,13 @@ def main():
         args.output_dir,
         fix_perspective=not args.skip_perspective,
         fix_brightness=not args.skip_brightness,
+        fix_noise=not args.skip_noise,
         auto_adjust=not args.manual_adjust,
         brightness=args.brightness,
         contrast=args.contrast,
-        use_clahe=args.use_clahe
+        use_clahe=args.use_clahe,
+        denoise_strength=args.denoise_strength,
+        detail_preservation=args.detail_preservation
     )
     print("Processing complete!")
 
