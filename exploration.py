@@ -2,6 +2,7 @@ import cv2
 import os
 import numpy as np
 import argparse
+import glob
 
 
 def remove_multicolored_noise(image, strength=3):
@@ -211,37 +212,6 @@ def apply_enhanced_denoising(image, strength=3, detail_preservation=0.6):
     final_result = np.uint8(refined * low_detail_mask + result * (1 - low_detail_mask))
     
     return final_result
-
-
-def preserve_black_areas(original_image, processed_image, threshold=20):
-    """
-    Preserve black areas (like holes) from the original image
-    
-    Args:
-        original_image: Original image with holes
-        processed_image: Processed image where holes need to be preserved
-        threshold: Brightness threshold to identify black areas
-        
-    Returns:
-        Image with black areas preserved
-    """
-    # Convert to grayscale
-    gray = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
-    
-    # Create a mask for very dark areas
-    _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
-    
-    # Dilate the mask slightly to ensure all of the black area is covered
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.dilate(mask, kernel, iterations=1)
-    
-    # Convert the mask to 3 channels for merging
-    mask_3ch = cv2.merge([mask, mask, mask])
-    
-    # Combine the images: use original where mask is white, processed elsewhere
-    result = np.where(mask_3ch > 0, original_image, processed_image)
-    
-    return result
 
 
 def apply_brightness_contrast(image, brightness=0, contrast=1.0, use_clahe=False):
@@ -575,7 +545,7 @@ def process_image(image, fix_perspective=True, fix_brightness=True, fix_noise=Tr
                  auto_adjust=True, brightness=30, contrast=1.5, use_clahe=False, 
                  denoise_strength=3, detail_preservation=0.6):
     """
-    Complete image processing pipeline
+    Complete image processing pipeline with all pixels processed
     
     Args:
         image: Input image
@@ -592,8 +562,7 @@ def process_image(image, fix_perspective=True, fix_brightness=True, fix_noise=Tr
     Returns:
         Processed image
     """
-    # Save a copy of the original for preserving black areas
-    original = image.copy()
+    # Initialize result as a copy of the input
     result = image.copy()
     
     # Step 1: Perspective correction
@@ -611,71 +580,50 @@ def process_image(image, fix_perspective=True, fix_brightness=True, fix_noise=Tr
         else:
             result = apply_brightness_contrast(result, brightness, contrast, use_clahe)
     
-    # Step 4: Ensure any black holes from the original image are preserved
-    # Create a mask for very dark areas
-    gray_original = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
-    _, black_mask = cv2.threshold(gray_original, 20, 255, cv2.THRESH_BINARY_INV)
-    
-    # Dilate the mask slightly to ensure full coverage
-    kernel = np.ones((3, 3), np.uint8)
-    black_mask = cv2.dilate(black_mask, kernel, iterations=1)
-    
-    # Apply the mask to preserve black areas from original
-    black_mask_3ch = cv2.merge([black_mask, black_mask, black_mask])
-    result = np.where(black_mask_3ch > 0, original, result)
-    
     return result
 
 
-def process_images(input_dir, output_dir, fix_perspective=True, fix_brightness=True, fix_noise=True,
-                  auto_adjust=True, brightness=30, contrast=1.5, use_clahe=False, 
-                  denoise_strength=3, detail_preservation=0.6):
-    """Process all images in input_dir and save results to output_dir"""
+def process_images(input_dir, output_dir, **kwargs):
+    """Process all images in the input directory and save results to output directory"""
     # Create output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Valid image extensions to process
-    valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp')
-    image_files = [f for f in os.listdir(input_dir) if f.lower().endswith(valid_extensions)]
-    
-    if not image_files:
-        print(f"No images found in directory: {input_dir}")
-        return
-    
-    print(f"Found {len(image_files)} images to process")
-    
-    # Process images sequentially
-    for i, filename in enumerate(image_files):
-        input_path = os.path.join(input_dir, filename)
-        output_path = os.path.join(output_dir, filename)
-        
+    # Clear existing files in output directory
+    for file in os.listdir(output_dir):
+        file_path = os.path.join(output_dir, file)
         try:
-            image = cv2.imread(input_path)
-            if image is None:
-                print(f"Warning: Could not read {filename}. Skipping...")
-                continue
-            
-            print(f"Processing: {filename} ({i+1}/{len(image_files)})")
-            
-            # Apply the complete processing pipeline
-            processed = process_image(
-                image, 
-                fix_perspective=fix_perspective,
-                fix_brightness=fix_brightness,
-                fix_noise=fix_noise,
-                auto_adjust=auto_adjust,
-                brightness=brightness,
-                contrast=contrast,
-                use_clahe=use_clahe,
-                denoise_strength=denoise_strength,
-                detail_preservation=detail_preservation
-            )
-            
-            cv2.imwrite(output_path, processed)
-            print(f"Saved: {output_path}")
+            if os.path.isfile(file_path):
+                os.unlink(file_path)
         except Exception as e:
-            print(f"Error processing {filename}: {str(e)}")
+            print(f"Error deleting {file_path}: {e}")
+    
+    # Get all JPG files (both .jpg and .jpeg extensions)
+    image_files = []
+    for extension in ['*.jpg', '*.jpeg']:
+        pattern = os.path.join(input_dir, extension)
+        image_files.extend(glob.glob(pattern))
+    
+    print(f"Found {len(image_files)} JPG images to process")
+    
+    # Process each image
+    for i, img_path in enumerate(image_files):
+        filename = os.path.basename(img_path)
+        print(f"Processing: {filename} ({i+1}/{len(image_files)})")
+        
+        # Read the image
+        image = cv2.imread(img_path)
+        if image is None:
+            print(f"Warning: Could not read image {img_path}")
+            continue
+        
+        # Process the image
+        result = process_image(image, **kwargs)
+        
+        # Save the result (will overwrite any existing file)
+        output_path = os.path.join(output_dir, filename)
+        cv2.imwrite(output_path, result)
+    
+    return len(image_files)
 
 
 def main():
@@ -684,7 +632,7 @@ def main():
         description="Advanced image processing pipeline with detail-preserving denoising."
     )
     parser.add_argument("--input_dir", default="driving_images", 
-                       help="Directory containing images to process")
+                       help="Directory containing JPG images to process")
     parser.add_argument("--output_dir", default="Results", 
                        help="Directory to save processed images")
     parser.add_argument("--skip_perspective", action="store_true",
@@ -708,7 +656,7 @@ def main():
     
     args = parser.parse_args()
     
-    print(f"Processing images from {args.input_dir} to {args.output_dir}")
+    print(f"Processing JPG images from {args.input_dir} to {args.output_dir}")
     process_images(
         args.input_dir, 
         args.output_dir,
