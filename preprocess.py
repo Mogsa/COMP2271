@@ -19,8 +19,8 @@ def denoise_image(image):
     y, cr, cb = cv2.split(ycrcb)
 
     # Denoise the color channels (targeting color noise)
-    denoised_cr = cv2.fastNlMeansDenoising(cr, None, h=15, templateWindowSize=7, searchWindowSize=21)
-    denoised_cb = cv2.fastNlMeansDenoising(cb, None, h=15, templateWindowSize=7, searchWindowSize=21)
+    denoised_cr = cv2.fastNlMeansDenoising(cr, None, h=10, templateWindowSize=7, searchWindowSize=21)
+    denoised_cb = cv2.fastNlMeansDenoising(cb, None, h=10, templateWindowSize=7, searchWindowSize=21)
 
     # Keep luminance channel as is to preserve details
     denoised_y = y

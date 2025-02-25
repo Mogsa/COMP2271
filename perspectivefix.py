@@ -1,119 +1,8 @@
+#!/usr/bin/env python3
 import cv2
-import os
 import numpy as np
+import os
 import argparse
-
-def apply_brightness_contrast(image, brightness=0, contrast=1.0, use_clahe=False):
-    """
-    Apply brightness and contrast adjustment to an image
-    
-    Args:
-        image: Input image (BGR format)
-        brightness: Brightness adjustment value (-100 to 100)
-        contrast: Contrast adjustment factor (0.0 to 3.0)
-        use_clahe: Whether to apply CLAHE instead of linear adjustments
-        
-    Returns:
-        Adjusted image
-    """
-    if use_clahe:
-        # Convert to LAB color space (better for CLAHE)
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        
-        # Apply CLAHE to L channel
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced_l = clahe.apply(l)
-        
-        # Merge channels and convert back to BGR
-        enhanced_lab = cv2.merge([enhanced_l, a, b])
-        return cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
-    else:
-        # Apply linear brightness and contrast
-        return cv2.convertScaleAbs(image, alpha=contrast, beta=brightness)
-
-
-def auto_brightness_contrast(image, clip_hist_percent=1):
-    """
-    Automatically adjust brightness and contrast based on image histogram
-    
-    Args:
-        image: Input image
-        clip_hist_percent: Percentage of histogram to clip at minimum and maximum
-        
-    Returns:
-        Automatically adjusted image
-    """
-    # Convert to grayscale if the image is color
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
-        
-    # Calculate grayscale histogram
-    hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
-    hist_size = len(hist)
-    
-    # Calculate cumulative distribution
-    accumulator = []
-    accumulator.append(float(hist[0]))
-    for index in range(1, hist_size):
-        accumulator.append(accumulator[index - 1] + float(hist[index]))
-    
-    # Locate points to clip
-    maximum = accumulator[-1]
-    clip_hist_percent *= (maximum/100.0)
-    clip_hist_percent /= 2.0
-    
-    # Locate left cut
-    minimum_gray = 0
-    while accumulator[minimum_gray] < clip_hist_percent:
-        minimum_gray += 1
-    
-    # Locate right cut
-    maximum_gray = hist_size - 1
-    while accumulator[maximum_gray] >= (maximum - clip_hist_percent):
-        maximum_gray -= 1
-    
-    # Calculate alpha and beta values
-    alpha = 255 / (maximum_gray - minimum_gray)
-    beta = -minimum_gray * alpha
-    
-    # Apply brightness/contrast correction
-    return cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
-
-
-def process_image(image, fix_perspective=True, fix_brightness=True, auto_adjust=True,
-                 brightness=30, contrast=1.5, use_clahe=False):
-    """
-    Complete image processing pipeline
-    
-    Args:
-        image: Input image
-        fix_perspective: Whether to apply perspective correction
-        fix_brightness: Whether to apply brightness/contrast correction
-        auto_adjust: Use automatic brightness/contrast adjustment
-        brightness: Manual brightness value
-        contrast: Manual contrast value
-        use_clahe: Use CLAHE instead of linear adjustments
-        
-    Returns:
-        Processed image
-    """
-    result = image.copy()
-    
-    # Step 1: Perspective correction
-    if fix_perspective:
-        result = auto_perspective_correction(result)
-    
-    # Step 2: Brightness and contrast correction
-    if fix_brightness:
-        if auto_adjust:
-            result = auto_brightness_contrast(result)
-        else:
-            result = apply_brightness_contrast(result, brightness, contrast, use_clahe)
-    
-    return result
 
 def auto_perspective_correction(image):
     """Ensure output is always a perfect square with 90 degree angles"""
@@ -355,9 +244,7 @@ def make_square(image):
     
     return square
 
-# Update the main processing function to use the new pipeline
-def process_images(input_dir, output_dir, fix_perspective=True, fix_brightness=True, 
-                  auto_adjust=True, brightness=30, contrast=1.5, use_clahe=False):
+def process_images(input_dir, output_dir):
     """Process all images in input_dir and save results to output_dir"""
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -373,7 +260,7 @@ def process_images(input_dir, output_dir, fix_perspective=True, fix_brightness=T
     
     print(f"Found {len(image_files)} images to process")
     
-    # Process images sequentially
+    # Process images sequentially as requested
     for i, filename in enumerate(image_files):
         input_path = os.path.join(input_dir, filename)
         output_path = os.path.join(output_dir, filename)
@@ -385,61 +272,26 @@ def process_images(input_dir, output_dir, fix_perspective=True, fix_brightness=T
                 continue
             
             print(f"Processing: {filename} ({i+1}/{len(image_files)})")
-            
-            # Apply the complete processing pipeline
-            processed = process_image(
-                image, 
-                fix_perspective=fix_perspective,
-                fix_brightness=fix_brightness,
-                auto_adjust=auto_adjust,
-                brightness=brightness,
-                contrast=contrast,
-                use_clahe=use_clahe
-            )
-            
-            cv2.imwrite(output_path, processed)
+            corrected = auto_perspective_correction(image)
+            cv2.imwrite(output_path, corrected)
             print(f"Saved: {output_path}")
         except Exception as e:
             print(f"Error processing {filename}: {str(e)}")
 
-
 def main():
     """Parse command line arguments and process images"""
     parser = argparse.ArgumentParser(
-        description="Image processing pipeline with perspective and brightness/contrast correction."
+        description="Fix perspective of images to be perfect squares with 90 degree angles."
     )
     parser.add_argument("--input_dir", default="driving_images", 
                        help="Directory containing images to process")
     parser.add_argument("--output_dir", default="Results", 
-                       help="Directory to save processed images")
-    parser.add_argument("--skip_perspective", action="store_true",
-                       help="Skip perspective correction")
-    parser.add_argument("--skip_brightness", action="store_true",
-                       help="Skip brightness/contrast correction")
-    parser.add_argument("--manual_adjust", action="store_true",
-                       help="Use manual brightness/contrast values instead of auto adjustment")
-    parser.add_argument("--brightness", type=int, default=30,
-                       help="Brightness adjustment (-100 to 100, default: 30)")
-    parser.add_argument("--contrast", type=float, default=1.5,
-                       help="Contrast adjustment (0.0 to 3.0, default: 1.5)")
-    parser.add_argument("--use_clahe", action="store_true",
-                       help="Use CLAHE for brightness/contrast correction")
-    
+                       help="Directory to save corrected images")
     args = parser.parse_args()
     
     print(f"Processing images from {args.input_dir} to {args.output_dir}")
-    process_images(
-        args.input_dir, 
-        args.output_dir,
-        fix_perspective=not args.skip_perspective,
-        fix_brightness=not args.skip_brightness,
-        auto_adjust=not args.manual_adjust,
-        brightness=args.brightness,
-        contrast=args.contrast,
-        use_clahe=args.use_clahe
-    )
+    process_images(args.input_dir, args.output_dir)
     print("Processing complete!")
-
 
 if __name__ == "__main__":
     main()
