@@ -31,7 +31,7 @@ parser.add_argument(
     "--data",
     type=str,
     help="specify path to the images",
-    default='driving_images')
+    default='Results')
 
 parser.add_argument(
     "--model",
